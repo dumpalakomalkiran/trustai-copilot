@@ -6,13 +6,18 @@ const money = (n, currency) => new Intl.NumberFormat('en-US', { style: 'currency
 
 function App() {
   const [transactions, setTransactions] = useState([])
+  const [merchantDecisions, setMerchantDecisions] = useState([])
+  const [note, setNote] = useState('')
+  const [message, setMessage] = useState('')  
   const [selectedId, setSelectedId] = useState(null)
+  useEffect(() => {
+    setNote('')
+    setMessage('')
+  }, [selectedId])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [decision, setDecision] = useState('')
-  const [note, setNote] = useState('')
-  const [message, setMessage] = useState('')  
   const [investigation, setInvestigation] = useState(null)
   const [investigating, setInvestigating] = useState(false)
   const [investigationError, setInvestigationError] = useState('')
@@ -27,18 +32,41 @@ function App() {
     }
   })
 
-
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'trustai-investigation-history',
+        JSON.stringify(investigationHistory)
+      )
+    } catch (error) {
+      console.error('Failed to save investigation history:', error)
+    }
+  }, [investigationHistory])
 
   async function load() {
     setLoading(true); setError('')
     try {
-      const res = await fetch(`${API}/api/transactions`)
-      if (!res.ok) throw new Error(`API returned ${res.status}`)
-      const data = await res.json()
-      setTransactions(data)
-      setSelectedId(current => current && data.some(t => t.id === current) ? current : data[0]?.id)
+      const [transactionsRes, decisionsRes] = await Promise.all([
+      fetch(`${API}/api/transactions`),
+      fetch(`${API}/api/merchant-decisions`),
+    ])
+
+    if (!transactionsRes.ok) {
+      throw new Error(`Transactions API returned ${transactionsRes.status}`)
+    }
+
+    if (!decisionsRes.ok) {
+      throw new Error(`Merchant decisions API returned ${decisionsRes.status}`)
+    }
+
+    const data = await transactionsRes.json()
+    const decisions = await decisionsRes.json()
+
+    setTransactions(data)
+    setMerchantDecisions(decisions)
+    setSelectedId(current => current && data.some(t => t.id === current) ? current : data[0]?.id)
     } catch (e) {
-      setError(`Could not reach the API at ${API}. Start the FastAPI backend and refresh.`)
+    setError(`Could not reach the API at ${API}. Start the FastAPI backend and refresh.`)
     } finally { setLoading(false) }
   }
 
@@ -53,6 +81,10 @@ function App() {
 
   async function submitReview(nextDecision) {
     if (!selected) return
+    if (nextDecision === 'REJECT' && !note.trim()) {
+      setMessage('Please provide a review note before rejecting this order.')
+      return
+    }
     setDecision(nextDecision); setMessage('')
     try {
       const res = await fetch(`${API}/api/transactions/${selected.id}/review`, {
@@ -62,7 +94,27 @@ function App() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Request failed')
-      setMessage(`Demo decision recorded for ${selected.id}: ${nextDecision.replaceAll('_', ' ')}.`)
+      setMerchantDecisions((current) => {
+        const updatedDecision = {
+          transaction_id: selected.id,
+          decision: data.decision,
+          note: data.note,
+        }
+
+        const exists = current.some(
+          (item) => item.transaction_id === selected.id
+        )
+
+        return exists
+          ? current.map((item) =>
+              item.transaction_id === selected.id ? updatedDecision : item
+            )
+          : [...current, updatedDecision]
+      })
+
+      setMessage(
+        `Demo decision recorded for ${selected.id}: ${nextDecision.replaceAll('_', ' ')}.`
+      )
     } catch (e) { setMessage(`Could not record decision: ${e.message}`) }
   }
 
@@ -130,7 +182,15 @@ function App() {
       <header className="topbar"><div className="breadcrumbs">Workspace <ChevronRight size={14}/> <strong>Risk overview</strong></div><div className="top-right"><span className="live-dot"/> Demo mode <div className="avatar">TC</div></div></header>
       <section className="page-heading"><div><div className="eyebrow"><Sparkles size={14}/> AI-POWERED PAYMENT INTELLIGENCE</div><h1>Risk overview</h1><p>Investigate payment signals, understand risk, and make informed review decisions.</p></div><button className="button secondary" onClick={load}><RefreshCw size={15}/> Refresh data</button></section>
 
-      {error && <div className="error-banner"><CircleAlert size={18}/>{error}</div>}
+      {error && (
+        <div
+          className="error-banner"
+          role="alert"
+          style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5' }}
+        >
+          <CircleAlert size={18} />{error}
+        </div>
+      )}
       <div className="demo-notice"><CircleAlert size={16}/><span><strong>Prototype mode:</strong> Risk indicators are calculated from synthetic example data. They are not PayPal fraud scores or production fraud detection.</span></div>
 
       <section className="metrics">
@@ -145,7 +205,7 @@ function App() {
           <div className="panel-heading"><div><h2>Recent transactions</h2><p>Choose a transaction to inspect its risk evidence.</p></div><span className="small-tag">{filtered.length} records</span></div>
           <div className="search-wrap"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search customer, ID, or status…"/></div>
           <div className="table-wrap"><table><thead><tr><th>TRANSACTION</th><th>AMOUNT</th><th>RISK</th><th>STATUS</th></tr></thead><tbody>
-            {filtered.map(t => <tr key={t.id} onClick={() => {setSelectedId(t.id);setMessage('');setInvestigation(null);setInvestigationError('');setInvestigationOpen(false)}} className={selectedId === t.id ? 'selected-row' : ''}>
+            {filtered.map(t => <tr key={t.id} onClick={() => {setSelectedId(t.id);setMessage('');setInvestigation(null);setInvestigationError('');setInvestigationOpen(false);setHistoryItem(null)}} className={selectedId === t.id ? 'selected-row' : ''}>
               <td><div className="tx-id">{t.id}</div><div className="tx-customer">{t.customer}</div></td>
               <td className="amount">{money(t.amount, t.currency)}</td>
               <td><RiskBadge level={t.assessment.level}/><div className="score">{t.assessment.score}/100 indicator score</div></td>
@@ -160,6 +220,34 @@ function App() {
           {selected ? <>
             <div className="panel-heading detail-heading"><div><div className="eyebrow">INVESTIGATION</div><h2>Transaction details</h2></div><span className="detail-icon"><ShieldCheck size={19}/></span></div>
             <div className="detail-amount"><span>{selected.id}</span><strong>{money(selected.amount, selected.currency)}</strong><div><StatusBadge status={selected.status}/><span className="customer-name">{selected.customer}</span></div></div>
+            
+            {(() => {
+              const savedDecision = merchantDecisions.find(
+                (item) => item.transaction_id === selected.id
+              )
+
+              return (
+                <div className="recommendation">
+                  <div className="recommendation-title">
+                    <ShieldCheck size={15} /> Merchant decision
+                  </div>
+
+                  {savedDecision ? (
+                    <>
+                      <strong>
+                        {savedDecision.decision.replaceAll('_', ' ')}
+                      </strong>
+                      <p>
+                        {savedDecision.note || 'No review note provided.'}
+                      </p>
+                    </>
+                  ) : (
+                    <p>No decision recorded for this transaction yet.</p>
+                  )}
+                </div>
+              )
+            })()}
+
             <div className="risk-summary"><div className={`risk-ring ${selected.assessment.level.toLowerCase()}`}><strong>{selected.assessment.score}</strong><span> / 100</span></div><div><RiskBadge level={selected.assessment.level}/><p>Rule-based prototype indicator</p></div></div>
             <div className="section-title">Risk evidence <span>{selected.assessment.evidence.length} signals</span></div>
             {selected.assessment.evidence.length ? <div className="evidence-list">{selected.assessment.evidence.map((ev, i) => <div className="evidence" key={i}><div className="evidence-mark"><CircleAlert size={15}/></div><div className="evidence-copy"><strong>{ev.signal}</strong><p>{ev.detail}</p></div><span className="points">+{ev.points}</span></div>)}</div> : <div className="no-evidence"><CheckCircle2 size={17}/><span>No elevated signals triggered by the current demo rules.</span></div>} 
@@ -190,7 +278,11 @@ function App() {
               </button>
 
               {investigationError && (
-                <div className="inline-message">
+                <div
+                  className="inline-message"
+                  role="alert"
+                  style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5' }}
+                >
                   {investigationError}
                 </div>
               )}
@@ -317,9 +409,71 @@ function App() {
               Merchant review <span>Human decision</span>
             </div>
 
-            <textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Add investigation notes (optional)…" rows={2}/>
-            <div className="action-grid"><button className="button secondary" onClick={() => submitReview('REVIEW')}>Keep for review</button><button className="button primary" onClick={() => submitReview('APPROVE_FOR_FULFILLMENT')}>Approve fulfillment</button><button className="button danger" onClick={() => submitReview('REJECT')}>Reject order</button></div>
-            {message && <div className="inline-message">{message}</div>}
+            {!merchantDecisions.some(
+              (item) =>
+                item.transaction_id === selected.id &&
+                item.decision === 'REJECT'
+            ) && (
+              <div>
+                <textarea value={note} onChange={e=>setNote(e.target.value)} required={true} placeholder="Explain why this order is being rejected or reviewed..." rows={2}/>
+              </div>
+            )}
+            
+            {(() => {
+              const savedDecision = merchantDecisions.find(
+                (item) => item.transaction_id === selected.id
+              )
+              const isRejected = savedDecision?.decision === 'REJECT'
+
+              return (
+                <>
+                  {isRejected ? (
+                    <div
+                      className="inline-message"
+                      role="status"
+                      style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5' }}
+                    >
+                      This order has been rejected and is closed. No further decisions are allowed.
+                    </div>
+                  ) : (
+                    <div className="action-grid">
+                      <button
+                        className="button secondary"
+                        onClick={() => submitReview('REVIEW')}
+                      >
+                        Keep for review
+                      </button>
+
+                      <button
+                        className="button primary"
+                        onClick={() => submitReview('APPROVE_FOR_FULFILLMENT')}
+                      >
+                        Approve fulfillment
+                      </button>
+
+                      <button
+                        className="button danger"
+                        onClick={() => submitReview('REJECT')}
+                      >
+                        Reject order
+                      </button>
+                    </div>
+                  )}
+                </>
+              )
+            })()}
+
+            {message && (
+              <div
+                className="inline-message"
+                role={message.startsWith('Demo decision recorded') ? 'status' : 'alert'}
+                style={message.startsWith('Demo decision recorded')
+                  ? { background: '#dcfce7', color: '#166534', border: '1px solid #86efac' }
+                  : { background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5' }}
+              >
+                {message}
+              </div>
+            )}
             <p className="disclaimer">These actions record a prototype review decision only. They do not change PayPal transaction status or move money.</p>
           </> : <div className="loading-state">{loading ? 'Loading transactions…' : 'Select a transaction to begin.'}</div>}
         </div>
@@ -413,7 +567,11 @@ function App() {
               </button>
 
               {investigationError && (
-                <div className="inline-message">
+                <div
+                  className="inline-message"
+                  role="alert"
+                  style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5' }}
+                >
                   {investigationError}
                 </div>
               )}

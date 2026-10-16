@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from app.investigation import explain_investigation
+import sqlite3
+from pathlib import Path
 
 
 app = FastAPI(
@@ -71,6 +73,36 @@ TRANSACTIONS = [
 ]
 
 
+# Demo-only merchant decisions, stored separately from payment status.
+MERCHANT_DECISIONS = {}
+
+
+# SQLite database for persistent merchant decisions
+DB_PATH = Path(__file__).resolve().parent / "trustai.db"
+
+
+def get_db_connection():
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database():
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS merchant_decisions (
+                transaction_id TEXT PRIMARY KEY,
+                decision TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+
+initialize_database()
+
 
 class InvestigationRequest(BaseModel):
     question: str = Field(
@@ -79,14 +111,12 @@ class InvestigationRequest(BaseModel):
         max_length=1000,
     )
 
-
 class ReviewRequest(BaseModel):
-    status: str = Field(
+    decision: str = Field(
         ...,
-        pattern="^(approved|rejected|escalated)$",
+        pattern="^(REVIEW|APPROVE_FOR_FULFILLMENT|REJECT)$",
     )
     note: str = Field(default="", max_length=1000)
-
 
 
 def assess(tx: dict) -> dict:
@@ -202,7 +232,6 @@ def list_transactions():
         for tx in TRANSACTIONS
     ]
 
-
 @app.get("/api/transactions/{transaction_id}")
 def get_transaction(transaction_id: str):
     for tx in TRANSACTIONS:
@@ -213,16 +242,42 @@ def get_transaction(transaction_id: str):
 
 @app.post("/api/transactions/{transaction_id}/review")
 def record_review(transaction_id: str, request: ReviewRequest):
-    for tx in TRANSACTIONS:
-        if tx["id"] == transaction_id:
-            # This starter returns the decision but does not persist it yet.
-            return {
-                "transaction_id": transaction_id,
-                "decision": request.decision,
-                "note": request.note,
-                "message": "Demo decision accepted. Persistence will be added in the next milestone.",
-            }
-    raise HTTPException(status_code=404, detail="Transaction not found")
+    # Find the transaction first so unknown IDs consistently return 404.
+    tx = next(
+        (item for item in TRANSACTIONS if item["id"] == transaction_id),
+        None,
+    )
+    if tx is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    clean_note = request.note.strip()
+    if request.decision == "REJECT" and not clean_note:
+        raise HTTPException(
+            status_code=422,
+            detail="A review note is required when rejecting an order.",
+        )
+
+    # A rejected order is closed; the backend enforces this regardless of UI state.
+    existing_decision = MERCHANT_DECISIONS.get(transaction_id)
+    if existing_decision and existing_decision["decision"] == "REJECT":
+        raise HTTPException(
+            status_code=409,
+            detail="This order has been rejected and is closed. No further decisions are allowed.",
+        )
+
+    decision_record = {
+        "transaction_id": transaction_id,
+        "decision": request.decision,
+        "note": clean_note,
+    }
+
+    MERCHANT_DECISIONS[transaction_id] = decision_record
+
+    return {
+        **decision_record,
+        "payment_status": tx["status"],
+        "message": "Demo merchant decision recorded.",
+    }
 
 
 @app.post("/api/transactions/{transaction_id}/investigate")
@@ -254,3 +309,7 @@ def investigate_transaction(
             status_code=503,
             detail="Investigation service is temporarily unavailable.",
         )
+
+@app.get("/api/merchant-decisions")
+def list_merchant_decisions():
+    return list(MERCHANT_DECISIONS.values())
